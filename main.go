@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
+
+	"goredis/client"
 
 	"github.com/labstack/gommon/log"
 )
@@ -109,6 +113,20 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func main() {
-	server := NewServer(Config{})
-	log.Fatal(server.Start())
+	go func() {
+		server := NewServer(Config{})
+		log.Fatal(server.Start())
+	}()
+
+	time.Sleep(time.Second)
+
+	for i := 0; i < 10; i++ {
+		client := client.New("localhost:5001")
+
+		if err := client.Set(context.Background(), "foo", "bar"); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	time.Sleep(time.Second)
 }
