@@ -1,15 +1,11 @@
 package main
 
 import (
-	"context"
+	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
-	"time"
-
-	"goredis/client"
-
-	"github.com/labstack/gommon/log"
 )
 
 const defaultListenAddr = ":5001"
@@ -19,7 +15,7 @@ type Config struct {
 }
 
 type Message struct {
-	data []byte
+	cmd  Command
 	peer *Peer
 }
 
@@ -28,6 +24,7 @@ type Server struct {
 	peers     map[*Peer]bool
 	ln        net.Listener
 	addPeerCh chan *Peer
+	delPeerCh chan *Peer
 	quitCh    chan struct{}
 	msgCh     chan Message
 
@@ -44,6 +41,7 @@ func NewServer(cfg Config) *Server {
 		Config:    cfg,
 		peers:     make(map[*Peer]bool),
 		addPeerCh: make(chan *Peer),
+		delPeerCh: make(chan *Peer),
 		quitCh:    make(chan struct{}),
 		msgCh:     make(chan Message),
 		kv:        NewKV(),
@@ -67,13 +65,7 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) handleMessage(msg Message) error {
-	cmd, err := parseCommand(string(msg.data))
-
-	if err != nil {
-		return err
-	}
-
-	switch v := cmd.(type) {
+	switch v := msg.cmd.(type) {
 	case GetCommand:
 		val, ok := s.kv.Get(v.key)
 
@@ -102,7 +94,13 @@ func (s *Server) loop() {
 				slog.Error("raw message error", "err", err)
 			}
 		case peer := <-s.addPeerCh:
+			slog.Info("peer connected", "remoteAddr", peer.conn.RemoteAddr().String())
+
 			s.peers[peer] = true
+		case peer := <-s.delPeerCh:
+			slog.Info("peer disconnected", "remoteAddr", peer.conn.RemoteAddr().String())
+
+			delete(s.peers, peer)
 		case <-s.quitCh:
 			return
 		}
@@ -124,8 +122,8 @@ func (s *Server) acceptLoop() error {
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	peer := NewPeer(conn, s.msgCh) // Create new peer
-	s.addPeerCh <- peer            // Add peer to peers map
+	peer := NewPeer(conn, s.msgCh, s.delPeerCh) // Create new peer
+	s.addPeerCh <- peer                         // Add peer to peers map
 
 	if err := peer.readLoop(); err != nil {
 		slog.Error("peer read error", "err", err, "remoteAddr", conn.RemoteAddr().String())
@@ -133,29 +131,11 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func main() {
-	server := NewServer(Config{})
+	listenAddr := flag.String("listenAddr", defaultListenAddr, "listen address")
+	flag.Parse()
 
-	go func() {
-		log.Fatal(server.Start())
-	}()
-
-	time.Sleep(time.Second)
-
-	client := client.New("localhost:5001")
-	for i := 0; i < 10; i++ {
-
-		if err := client.Set(context.Background(), fmt.Sprintf("foo_%d", i), "bar"); err != nil {
-			log.Fatal(err)
-		}
-
-		time.Sleep(time.Second)
-
-		val, err := client.Get(context.Background(), fmt.Sprintf("foo_%d", i))
-
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		fmt.Println("got this back =>", val)
-	}
+	server := NewServer(Config{
+		ListenAddr: *listenAddr, // it's a pointer because flag.String returns a pointer
+	})
+	log.Fatal(server.Start())
 }
